@@ -1,0 +1,795 @@
+import React, { useState, useRef, useEffect } from 'react';
+import { 
+  BookOpen, 
+  Camera, 
+  HelpCircle, 
+  FileText, 
+  Send, 
+  Sparkles, 
+  Upload, 
+  Copy, 
+  Check, 
+  Trash2, 
+  ChevronRight, 
+  Lightbulb, 
+  GraduationCap, 
+  RefreshCw,
+  Cpu,
+  Feather
+} from 'lucide-react';
+
+// --- API Helper ---
+const API_KEY = ""; // Dynamic key or default empty string
+
+async function callGemini({ prompt, imageBase64, mimeType, systemInstruction }) {
+  const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${API_KEY}`;
+  
+  const parts = [];
+  if (prompt) {
+    parts.push({ text: prompt });
+  }
+  
+  if (imageBase64 && mimeType) {
+    parts.push({
+      inlineData: {
+        mimeType: mimeType,
+        data: imageBase64
+      }
+    });
+  }
+
+  const payload = {
+    contents: [{ role: "user", parts }],
+  };
+
+  if (systemInstruction) {
+    payload.systemInstruction = {
+      parts: [{ text: systemInstruction }]
+    };
+  }
+
+  // Exponential backoff logic for retries
+  let delay = 1000;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const data = await response.json();
+      const textResult = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      
+      if (!textResult) {
+        throw new Error("Geçerli bir yanıt alınamadı.");
+      }
+
+      return textResult;
+    } catch (err) {
+      if (attempt === 2) throw err;
+      await new Promise(res => setTimeout(res, delay));
+      delay *= 2;
+    }
+  }
+}
+
+// --- Simple Custom Markdown Renderer Component ---
+function SimpleMarkdown({ content }) {
+  if (!content) return null;
+
+  // Basic formatting parsing for bold, code, lists, and line breaks
+  const lines = content.split('\n');
+
+  return (
+    <div className="space-y-2 text-slate-700 leading-relaxed text-sm md:text-base">
+      {lines.map((line, idx) => {
+        let trimmed = line.trim();
+
+        if (trimmed.startsWith('### ')) {
+          return <h3 key={idx} className="text-lg font-bold text-slate-800 mt-4 mb-2">{trimmed.replace('### ', '')}</h3>;
+        }
+        if (trimmed.startsWith('## ')) {
+          return <h2 key={idx} className="text-xl font-bold text-slate-800 mt-5 mb-2 border-b border-slate-100 pb-1">{trimmed.replace('## ', '')}</h2>;
+        }
+        if (trimmed.startsWith('# ')) {
+          return <h1 key={idx} className="text-2xl font-extrabold text-slate-900 mt-6 mb-3">{trimmed.replace('# ', '')}</h1>;
+        }
+        if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
+          const listText = trimmed.substring(2);
+          return (
+            <div key={idx} className="flex items-start gap-2 my-1 pl-2">
+              <span className="inline-block w-1.5 h-1.5 rounded-full bg-indigo-500 mt-2.5 flex-shrink-0"></span>
+              <span dangerouslySetInnerHTML={{ __html: formatInlineMarkdown(listText) }} />
+            </div>
+          );
+        }
+        if (/^\d+\.\s/.test(trimmed)) {
+          const match = trimmed.match(/^(\d+)\.\s(.*)/);
+          return (
+            <div key={idx} className="flex items-start gap-2.5 my-1.5 pl-1">
+              <span className="font-semibold text-indigo-600 bg-indigo-50 text-xs px-2 py-0.5 rounded-md mt-0.5">{match[1]}</span>
+              <span dangerouslySetInnerHTML={{ __html: formatInlineMarkdown(match[2]) }} />
+            </div>
+          );
+        }
+
+        if (trimmed === '') return <div key={idx} className="h-2"></div>;
+
+        return (
+          <p key={idx} dangerouslySetInnerHTML={{ __html: formatInlineMarkdown(line) }} />
+        );
+      })}
+    </div>
+  );
+}
+
+function formatInlineMarkdown(text) {
+  return text
+    .replace(/\*\*(.*?)\*\*/g, '<strong class="font-semibold text-slate-900">$1</strong>')
+    .replace(/\*(.*?)\*/g, '<em class="italic text-slate-800">$1</em>')
+    .replace(/`(.*?)`/g, '<code class="bg-slate-100 text-indigo-600 font-mono text-xs px-1.5 py-0.5 rounded border border-slate-200">$1</code>');
+}
+
+// --- Main App Component ---
+export default function App() {
+  const [activeTab, setActiveTab] = useState('solver');
+  
+  // States for Homework Solver
+  const [questionText, setQuestionText] = useState('');
+  const [subject, setSubject] = useState('Matematik');
+  const [gradeLevel, setGradeLevel] = useState('Lise');
+  const [solverResult, setSolverResult] = useState('');
+  const [isSolving, setIsSolving] = useState(false);
+
+  // States for Image Solver
+  const [imageFile, setImageFile] = useState(null);
+  const [imagePreview, setImagePreview] = useState(null);
+  const [imagePrompt, setImagePrompt] = useState('');
+  const [imageResult, setImageResult] = useState('');
+  const [isAnalyzingImage, setIsAnalyzingImage] = useState(false);
+
+  // States for Topic Explanation
+  const [topicName, setTopicName] = useState('');
+  const [topicDetail, setTopicDetail] = useState('');
+  const [topicResult, setTopicResult] = useState('');
+  const [isExplaining, setIsExplaining] = useState(false);
+
+  // States for Text Summarization
+  const [summaryText, setSummaryText] = useState('');
+  const [summaryStyle, setSummaryStyle] = useState('maddeler'); // 'maddeler', 'kisa', 'kavramlar'
+  const [summaryResult, setSummaryResult] = useState('');
+  const [isSummarizing, setIsSummarizing] = useState(false);
+
+  // Copy status state
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = (text) => {
+    navigator.clipboard.writeText(text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  // 1. Solve Question Function
+  const handleSolveQuestion = async () => {
+    if (!questionText.trim()) return;
+    setIsSolving(true);
+    setSolverResult('');
+
+    const systemInstruction = `Sen Türkiye eğitim müfredatına son derece hakim, öğrenci dostu, sabırlı ve uzman bir özel ders öğretmenisin. 
+Sana sorulan soruları şu yapıda ve anlaşılır Türkçe ile cevapla:
+1. 💡 **Kısaca Mantık ve Yaklaşım**: Sorunun temelinde ne var?
+2. 📝 **Adım Adım Çözüm**: İnce detaylarıyla, neden öyle yapıldığını açıklayarak adımları sırala.
+3. 🎯 **Sonuç**: Net cevabı vurgula.
+4. 📌 **Altın İpucu / Unutulmaması Gereken Kural**: Öğrencinin benzer sorularda işine yarayacak pratik kuralı ekle.`;
+
+    const prompt = `Ders: ${subject}\nEğitim Seviyesi: ${gradeLevel}\nSoru: ${questionText}`;
+
+    try {
+      const res = await callGemini({ prompt, systemInstruction });
+      setSolverResult(res);
+    } catch (err) {
+      setSolverResult("⚠️ Çözüm oluşturulurken bir hata oluştu. Lütfen tekrar deneyin.");
+    } finally {
+      setIsSolving(false);
+    }
+  };
+
+  // 2. Image Question Solver Function
+  const handleImageUpload = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    
+    if (file.size > 5 * 1024 * 1024) {
+      alert("Lütfen 5MB'dan küçük bir resim dosyası seçin.");
+      return;
+    }
+
+    setImageFile(file);
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      setImagePreview(reader.result);
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleSolveImage = async () => {
+    if (!imagePreview) return;
+    setIsAnalyzingImage(true);
+    setImageResult('');
+
+    const base64Data = imagePreview.split(',')[1];
+    const mimeType = imageFile.type;
+
+    const systemInstruction = `Sen görseldeki soruları eksiksiz okuyup çözen uzman bir eğitmensin.
+Görseldeki yazıyı veya matematiksel ifadeyi önce belirle, ardından anlaşılır, adım adım bir çözüm sun.
+Eğer görsel net değilse veya soru tam okunmuyorsa bunu nazikçe belirt.`;
+
+    const prompt = imagePrompt.trim() 
+      ? `Görseldeki soruyu incele. Özel istek/not: ${imagePrompt}` 
+      : `Görseldeki soruyu ayrıntılı ve adım adım çöz. Doktrinleri ve kuralları açıkça belirt.`;
+
+    try {
+      const res = await callGemini({ 
+        prompt, 
+        imageBase64: base64Data, 
+        mimeType, 
+        systemInstruction 
+      });
+      setImageResult(res);
+    } catch (err) {
+      setImageResult("⚠️ Görsel analiz edilirken bir hata oluştu. Lütfen görselin net olduğundan emin olup tekrar deneyin.");
+    } finally {
+      setIsAnalyzingImage(false);
+    }
+  };
+
+  // 3. Topic Explanation Function
+  const handleExplainTopic = async () => {
+    if (!topicName.trim()) return;
+    setIsExplaining(true);
+    setTopicResult('');
+
+    const systemInstruction = `Sen öğrencilerin karmaşık konuları saniyeler içinde kavramasını sağlayan, eğlenceli ve benzetmeler (analojiler) kullanan harika bir ders anlatıcısısın.
+Konuyu şu akışta anlat:
+1. 🌟 **Bunu Neden Öğreniyoruz? (Günlük Hayat Karşılığı)**
+2. 🧠 **En Basit Anlatımla Konu Özeti**
+3. 🔑 **Temel Kavramlar & Püf Noktaları**
+4. 💡 **Akılda Tutmak İçin Analoji / Hikaye**
+5. ✍️ **Örnek Soru & Çözümü**`;
+
+    const prompt = `Konu Başlığı: ${topicName}\nSeviye: ${gradeLevel}\nOdaklanılması/Özellikle Anlaşılmayan Kısım: ${topicDetail || 'Konunun tamamı genel hatlarıyla'}`;
+
+    try {
+      const res = await callGemini({ prompt, systemInstruction });
+      setTopicResult(res);
+    } catch (err) {
+      setTopicResult("⚠️ Konu anlatımı hazırlanırken bir hata oluştu. Lütfen tekrar deneyin.");
+    } finally {
+      setIsExplaining(false);
+    }
+  };
+
+  // 4. Text Summarizer Function
+  const handleSummarize = async () => {
+    if (!summaryText.trim()) return;
+    setIsSummarizing(true);
+    setSummaryResult('');
+
+    let styleInstruction = "";
+    if (summaryStyle === 'maddeler') {
+      styleInstruction = "Metni düzenli, anlaşılır ve en önemli bilgileri içeren madde işaretleri halinde özetle.";
+    } else if (summaryStyle === 'kisa') {
+      styleInstruction = "Metni maksimum 3-4 cümlelik ultra kısa ve öz bir paragraf haline getir.";
+    } else {
+      styleInstruction = "Metindeki temel terimleri, kilit kavramları ve bunların kısa tanımlarını liste yap.";
+    }
+
+    const systemInstruction = `Sen profesyonel bir metin analisti ve ders notu hazırlayıcısısın. Öğrencilerin zamandan tasarruf etmesi için uzun ders metinlerini sadeleştirirsin.
+Tarz: ${styleInstruction}`;
+
+    const prompt = `Aşağıdaki metni analiz et ve özetle:\n\n${summaryText}`;
+
+    try {
+      const res = await callGemini({ prompt, systemInstruction });
+      setSummaryResult(res);
+    } catch (err) {
+      setSummaryResult("⚠️ Metin özetlenirken bir hata oluştu.");
+    } finally {
+      setIsSummarizing(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-50 text-slate-800 flex flex-col md:flex-row font-sans selection:bg-indigo-100 selection:text-indigo-700">
+      
+      {/* Sidebar Navigation */}
+      <aside className="w-full md:w-64 bg-white border-r border-slate-200/80 flex flex-col justify-between p-4 flex-shrink-0 z-10 shadow-sm md:shadow-none">
+        <div>
+          {/* Logo */}
+          <div className="flex items-center gap-3 px-2 py-3 mb-6">
+            <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-indigo-600 to-violet-500 flex items-center justify-center text-white shadow-md shadow-indigo-200">
+              <GraduationCap className="w-6 h-6" />
+            </div>
+            <div>
+              <h1 className="font-bold text-slate-900 tracking-tight text-lg">ÖdevDostu</h1>
+              <p className="text-xs text-slate-400 font-medium">Yapay Zeka Asistanı</p>
+            </div>
+          </div>
+
+          {/* Navigation Links */}
+          <nav className="space-y-1.5">
+            <button
+              onClick={() => setActiveTab('solver')}
+              className={`w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm font-medium transition-all ${
+                activeTab === 'solver'
+                  ? 'bg-indigo-50 text-indigo-600 shadow-sm'
+                  : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'
+              }`}
+            >
+              <HelpCircle className="w-4 h-4" />
+              Zor Soru Çözücü
+            </button>
+
+            <button
+              onClick={() => setActiveTab('image')}
+              className={`w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm font-medium transition-all ${
+                activeTab === 'image'
+                  ? 'bg-indigo-50 text-indigo-600 shadow-sm'
+                  : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'
+              }`}
+            >
+              <Camera className="w-4 h-4" />
+              Görselden Soru Çöz
+            </button>
+
+            <button
+              onClick={() => setActiveTab('topic')}
+              className={`w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm font-medium transition-all ${
+                activeTab === 'topic'
+                  ? 'bg-indigo-50 text-indigo-600 shadow-sm'
+                  : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'
+              }`}
+            >
+              <BookOpen className="w-4 h-4" />
+              Kolay Konu Anlatımı
+            </button>
+
+            <button
+              onClick={() => setActiveTab('summary')}
+              className={`w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm font-medium transition-all ${
+                activeTab === 'summary'
+                  ? 'bg-indigo-50 text-indigo-600 shadow-sm'
+                  : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'
+              }`}
+            >
+              <FileText className="w-4 h-4" />
+              Metin Özetleme
+            </button>
+          </nav>
+        </div>
+
+        {/* Footer info in sidebar */}
+        <div className="pt-4 border-t border-slate-100 px-2 mt-4">
+          <div className="flex items-center gap-2 text-xs text-slate-400">
+            <Cpu className="w-3.5 h-3.5 text-indigo-500" />
+            <span>Gemini AI Gücüyle Çalışır</span>
+          </div>
+        </div>
+      </aside>
+
+      {/* Main Content Area */}
+      <main className="flex-1 overflow-y-auto p-4 md:p-8">
+        <div className="max-w-4xl mx-auto space-y-6">
+
+          {/* TAB 1: Soru Çözücü */}
+          {activeTab === 'solver' && (
+            <div className="space-y-6 animate-fadeIn">
+              <header className="space-y-1">
+                <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-indigo-50 text-indigo-600 text-xs font-semibold">
+                  <Sparkles className="w-3.5 h-3.5" /> Adım Adım Çözüm
+                </div>
+                <h2 className="text-2xl font-bold text-slate-900">Zor Soru Çözücü</h2>
+                <p className="text-slate-500 text-sm">Karmaşık matematik, fen veya sosyal sorularınızı yazın, anlaşılır bir dille çözelim.</p>
+              </header>
+
+              <div className="bg-white rounded-2xl p-5 border border-slate-200/80 shadow-sm space-y-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-600 mb-1.5">Ders / Alan</label>
+                    <select 
+                      value={subject} 
+                      onChange={(e) => setSubject(e.target.value)}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                    >
+                      <option value="Matematik">Matematik</option>
+                      <option value="Fizik">Fizik</option>
+                      <option value="Kimya">Kimya</option>
+                      <option value="Biyoloji">Biyoloji</option>
+                      <option value="Türkçe / Edebiyat">Türkçe / Edebiyat</option>
+                      <option value="Tarih">Tarih</option>
+                      <option value="Coğrafya">Coğrafya</option>
+                      <option value="İngilizce">İngilizce</option>
+                      <option value="Diğer">Diğer</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-600 mb-1.5">Eğitim Seviyesi</label>
+                    <select 
+                      value={gradeLevel} 
+                      onChange={(e) => setGradeLevel(e.target.value)}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                    >
+                      <option value="İlkokul">İlkokul</option>
+                      <option value="Ortaokul (LGS)">Ortaokul (LGS)</option>
+                      <option value="Lise (YKS / TYT / AYT)">Lise (YKS / TYT / AYT)</option>
+                      <option value="Üniversite">Üniversite</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1.5">Sorunuzu Yazın</label>
+                  <textarea
+                    rows={4}
+                    value={questionText}
+                    onChange={(e) => setQuestionText(e.target.value)}
+                    placeholder="Örn: 2x + 5 = 15 ise x kaçtır? Veya: Fotosentezin evrelerini açıklayıp kloroplastın görevini yazınız..."
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all resize-y"
+                  ></textarea>
+                </div>
+
+                <div className="flex justify-end">
+                  <button
+                    onClick={handleSolveQuestion}
+                    disabled={isSolving || !questionText.trim()}
+                    className="inline-flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-medium px-5 py-2.5 rounded-xl text-sm transition-all shadow-sm shadow-indigo-200"
+                  >
+                    {isSolving ? (
+                      <>
+                        <RefreshCw className="w-4 h-4 animate-spin" />
+                        Çözülüyor...
+                      </>
+                    ) : (
+                      <>
+                        <Send className="w-4 h-4" />
+                        Soruyu Çöz
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              {/* Result Area */}
+              {solverResult && (
+                <div className="bg-white rounded-2xl p-6 border border-slate-200/80 shadow-sm relative space-y-3">
+                  <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                    <span className="text-xs font-semibold text-indigo-600 uppercase tracking-wider flex items-center gap-1.5">
+                      <Lightbulb className="w-4 h-4 text-indigo-500" /> Yapay Zeka Çözümü
+                    </span>
+                    <button
+                      onClick={() => handleCopy(solverResult)}
+                      className="text-xs text-slate-400 hover:text-slate-600 flex items-center gap-1 bg-slate-50 hover:bg-slate-100 px-2.5 py-1 rounded-lg transition-all"
+                    >
+                      {copied ? <Check className="w-3.5 h-3.5 text-emerald-500" /> : <Copy className="w-3.5 h-3.5" />}
+                      {copied ? "Kopyalandı" : "Kopyala"}
+                    </button>
+                  </div>
+                  <SimpleMarkdown content={solverResult} />
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* TAB 2: Görselden Soru Çözüm */}
+          {activeTab === 'image' && (
+            <div className="space-y-6 animate-fadeIn">
+              <header className="space-y-1">
+                <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-violet-50 text-violet-600 text-xs font-semibold">
+                  <Camera className="w-3.5 h-3.5" /> Görsel Analiz
+                </div>
+                <h2 className="text-2xl font-bold text-slate-900">Görselden Soru Çözümü</h2>
+                <p className="text-slate-500 text-sm">Sorunun veya sayfanın fotoğrafını yükleyin, anında çözümünü alın.</p>
+              </header>
+
+              <div className="bg-white rounded-2xl p-5 border border-slate-200/80 shadow-sm space-y-4">
+                {/* Upload Box */}
+                <div className="border-2 border-dashed border-slate-200 rounded-xl p-6 text-center hover:border-indigo-400 transition-all bg-slate-50/50 relative">
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={handleImageUpload}
+                    className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                  />
+                  {imagePreview ? (
+                    <div className="space-y-3">
+                      <img 
+                        src={imagePreview} 
+                        alt="Soru Görseli" 
+                        className="max-h-64 mx-auto rounded-lg shadow-sm border border-slate-200 object-contain" 
+                      />
+                      <div className="flex items-center justify-center gap-2">
+                        <span className="text-xs text-slate-500">{imageFile?.name}</span>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setImageFile(null);
+                            setImagePreview(null);
+                          }}
+                          className="text-red-500 hover:text-red-700 text-xs font-medium flex items-center gap-1"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" /> Kaldır
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="space-y-2 pointer-events-none">
+                      <div className="w-12 h-12 bg-indigo-50 text-indigo-600 rounded-full flex items-center justify-center mx-auto">
+                        <Upload className="w-6 h-6" />
+                      </div>
+                      <p className="text-sm font-medium text-slate-700">Fotoğraf yüklemek için tıklayın veya sürükleyin</p>
+                      <p className="text-xs text-slate-400">PNG, JPG, JPEG (Max 5MB)</p>
+                    </div>
+                  )}
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1.5">Ekstra Not / İstek (Opsiyonel)</label>
+                  <input
+                    type="text"
+                    value={imagePrompt}
+                    onChange={(e) => setImagePrompt(e.target.value)}
+                    placeholder="Örn: Sadece 3. şıkkı açıklar mısın? Veya: Hangi formül kullanıldı?"
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                  />
+                </div>
+
+                <div className="flex justify-end">
+                  <button
+                    onClick={handleSolveImage}
+                    disabled={isAnalyzingImage || !imagePreview}
+                    className="inline-flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-medium px-5 py-2.5 rounded-xl text-sm transition-all shadow-sm shadow-indigo-200"
+                  >
+                    {isAnalyzingImage ? (
+                      <>
+                        <RefreshCw className="w-4 h-4 animate-spin" />
+                        Görsel İnceleniyor...
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles className="w-4 h-4" />
+                        Fotoğraftaki Soruyu Çöz
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              {/* Result Area */}
+              {imageResult && (
+                <div className="bg-white rounded-2xl p-6 border border-slate-200/80 shadow-sm space-y-3">
+                  <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                    <span className="text-xs font-semibold text-violet-600 uppercase tracking-wider flex items-center gap-1.5">
+                      <Check className="w-4 h-4 text-violet-500" /> Görsel Analiz Çözümü
+                    </span>
+                    <button
+                      onClick={() => handleCopy(imageResult)}
+                      className="text-xs text-slate-400 hover:text-slate-600 flex items-center gap-1 bg-slate-50 hover:bg-slate-100 px-2.5 py-1 rounded-lg transition-all"
+                    >
+                      {copied ? <Check className="w-3.5 h-3.5 text-emerald-500" /> : <Copy className="w-3.5 h-3.5" />}
+                      {copied ? "Kopyalandı" : "Kopyala"}
+                    </button>
+                  </div>
+                  <SimpleMarkdown content={imageResult} />
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* TAB 3: Konu Anlatımı */}
+          {activeTab === 'topic' && (
+            <div className="space-y-6 animate-fadeIn">
+              <header className="space-y-1">
+                <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-600 text-xs font-semibold">
+                  <BookOpen className="w-3.5 h-3.5" /> Anlaşılır Dersler
+                </div>
+                <h2 className="text-2xl font-bold text-slate-900">Kolay Konu Anlatımı</h2>
+                <p className="text-slate-500 text-sm">Anlamakta zorlandığınız konuları günlük hayat benzetmeleri ve basit adımlarla öğrenin.</p>
+              </header>
+
+              <div className="bg-white rounded-2xl p-5 border border-slate-200/80 shadow-sm space-y-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-600 mb-1.5">Konu Adı</label>
+                    <input
+                      type="text"
+                      value={topicName}
+                      onChange={(e) => setTopicName(e.target.value)}
+                      placeholder="Örn: Newton'un Hareket Yasaları, Mitoz Bölünme..."
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-600 mb-1.5">Sınıf / Seviye</label>
+                    <select 
+                      value={gradeLevel} 
+                      onChange={(e) => setGradeLevel(e.target.value)}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                    >
+                      <option value="İlkokul">İlkokul</option>
+                      <option value="Ortaokul">Ortaokul</option>
+                      <option value="Lise">Lise</option>
+                      <option value="Üniversite">Üniversite</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1.5">Özellikle Karıştırılan Yer (Opsiyonel)</label>
+                  <input
+                    type="text"
+                    value={topicDetail}
+                    onChange={(e) => setTopicDetail(e.target.value)}
+                    placeholder="Örn: Anafaz ve Telofaz evrelerinin farkını anlamıyorum..."
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                  />
+                </div>
+
+                <div className="flex justify-end">
+                  <button
+                    onClick={handleExplainTopic}
+                    disabled={isExplaining || !topicName.trim()}
+                    className="inline-flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-medium px-5 py-2.5 rounded-xl text-sm transition-all shadow-sm shadow-indigo-200"
+                  >
+                    {isExplaining ? (
+                      <>
+                        <RefreshCw className="w-4 h-4 animate-spin" />
+                        Anlatım Hazırlanıyor...
+                      </>
+                    ) : (
+                      <>
+                        <Feather className="w-4 h-4" />
+                        Basitçe Anlat
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              {/* Result Area */}
+              {topicResult && (
+                <div className="bg-white rounded-2xl p-6 border border-slate-200/80 shadow-sm space-y-3">
+                  <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                    <span className="text-xs font-semibold text-emerald-600 uppercase tracking-wider flex items-center gap-1.5">
+                      <BookOpen className="w-4 h-4 text-emerald-500" /> Özel Konu Rehberi
+                    </span>
+                    <button
+                      onClick={() => handleCopy(topicResult)}
+                      className="text-xs text-slate-400 hover:text-slate-600 flex items-center gap-1 bg-slate-50 hover:bg-slate-100 px-2.5 py-1 rounded-lg transition-all"
+                    >
+                      {copied ? <Check className="w-3.5 h-3.5 text-emerald-500" /> : <Copy className="w-3.5 h-3.5" />}
+                      {copied ? "Kopyalandı" : "Kopyala"}
+                    </button>
+                  </div>
+                  <SimpleMarkdown content={topicResult} />
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* TAB 4: Metin Özetleme */}
+          {activeTab === 'summary' && (
+            <div className="space-y-6 animate-fadeIn">
+              <header className="space-y-1">
+                <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-50 text-amber-600 text-xs font-semibold">
+                  <FileText className="w-3.5 h-3.5" /> Hızlı Ders Notu
+                </div>
+                <h2 className="text-2xl font-bold text-slate-900">Metin Özetleme</h2>
+                <p className="text-slate-500 text-sm">Uzun ders metinlerini veya makaleleri yapıştırın, anahtar noktaları hemen çıkaralım.</p>
+              </header>
+
+              <div className="bg-white rounded-2xl p-5 border border-slate-200/80 shadow-sm space-y-4">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1.5">Özetleme Formatı</label>
+                  <div className="grid grid-cols-3 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setSummaryStyle('maddeler')}
+                      className={`py-2 px-3 text-xs font-medium rounded-xl border transition-all ${
+                        summaryStyle === 'maddeler'
+                          ? 'bg-indigo-50 border-indigo-200 text-indigo-600'
+                          : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'
+                      }`}
+                    >
+                      📌 Maddeler Halinde
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSummaryStyle('kisa')}
+                      className={`py-2 px-3 text-xs font-medium rounded-xl border transition-all ${
+                        summaryStyle === 'kisa'
+                          ? 'bg-indigo-50 border-indigo-200 text-indigo-600'
+                          : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'
+                      }`}
+                    >
+                      ⚡ Ultra Kısa Paragraf
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSummaryStyle('kavramlar')}
+                      className={`py-2 px-3 text-xs font-medium rounded-xl border transition-all ${
+                        summaryStyle === 'kavramlar'
+                          ? 'bg-indigo-50 border-indigo-200 text-indigo-600'
+                          : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'
+                      }`}
+                    >
+                      🔑 Kilit Kavramlar
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1.5">Özetlenecek Metin</label>
+                  <textarea
+                    rows={6}
+                    value={summaryText}
+                    onChange={(e) => setSummaryText(e.target.value)}
+                    placeholder="Ders kitabı sayfasını, kitap özetini veya uzun ders notlarını buraya yapıştırın..."
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all resize-y"
+                  ></textarea>
+                </div>
+
+                <div className="flex justify-end">
+                  <button
+                    onClick={handleSummarize}
+                    disabled={isSummarizing || !summaryText.trim()}
+                    className="inline-flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-medium px-5 py-2.5 rounded-xl text-sm transition-all shadow-sm shadow-indigo-200"
+                  >
+                    {isSummarizing ? (
+                      <>
+                        <RefreshCw className="w-4 h-4 animate-spin" />
+                        Özetleniyor...
+                      </>
+                    ) : (
+                      <>
+                        <FileText className="w-4 h-4" />
+                        Metni Özetle
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              {/* Result Area */}
+              {summaryResult && (
+                <div className="bg-white rounded-2xl p-6 border border-slate-200/80 shadow-sm space-y-3">
+                  <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                    <span className="text-xs font-semibold text-amber-600 uppercase tracking-wider flex items-center gap-1.5">
+                      <FileText className="w-4 h-4 text-amber-500" /> Ders Özeti
+                    </span>
+                    <button
+                      onClick={() => handleCopy(summaryResult)}
+                      className="text-xs text-slate-400 hover:text-slate-600 flex items-center gap-1 bg-slate-50 hover:bg-slate-100 px-2.5 py-1 rounded-lg transition-all"
+                    >
+                      {copied ? <Check className="w-3.5 h-3.5 text-emerald-500" /> : <Copy className="w-3.5 h-3.5" />}
+                      {copied ? "Kopyalandı" : "Kopyala"}
+                    </button>
+                  </div>
+                  <SimpleMarkdown content={summaryResult} />
+                </div>
+              )}
+            </div>
+          )}
+
+        </div>
+      </main>
+    </div>
+  );
+}
